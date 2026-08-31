@@ -13,12 +13,13 @@
     "mcp.js",
     "transcript.js",
     "providers/claude.js",
+    "providers/opencode.js",
     "config.js",
     "nvim",
     "nvim-lazy"
   ],
   "scripts": {
-    "test": "node --test cli.test.js mcp.test.js providers/claude.test.js server.test.js transcript.test.js",
+    "test": "node --test cli.test.js mcp.test.js providers/claude.test.js providers/opencode.test.js server.test.js transcript.test.js",
     "test:nvim": "node --test nvim/tests/profile_startup.test.js && nvim --headless --clean -u NONE -l nvim/tests/session_headless.lua && nvim --headless --clean -u NONE -l nvim/tests/agentterm_headless.lua && nvim --headless --clean -u NONE -l nvim/tests/workspace_headless.lua && nvim --headless --clean -u NONE -l nvim/tests/agents_headless.lua && nvim --headless --clean -u NONE -l nvim/tests/chat_headless.lua && nvim --headless --clean -u NONE -l nvim/tests/watch_headless.lua && nvim --headless --clean -u NONE -l nvim/tests/data_headless.lua",
     "test:tmux": "node --test vibench.test.js terminal.test.js nvim/tests/agentterm_test.js",
     "start": "node cli.js"

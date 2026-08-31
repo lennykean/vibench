@@ -581,6 +581,18 @@ async function timelineFileFor(session, found, sourceKey, identity, since, reque
   if (state.pending) {
     await state.pending;
   }
+  return finishTimeline({
+    session, found, state, sourceKey, identity, previousSource, since, requestedRevision,
+    agentId, sourceSessionId, includeChat, includeEvents,
+    transcript: stats.at(-1).file,
+    transcripts: files ? [...files] : undefined,
+    mtime: Math.max(...stats.map(({ stat: current }) => current.mtimeMs)),
+  });
+}
+
+function finishTimeline({ session, found, state, sourceKey, identity, previousSource, since,
+  requestedRevision, agentId, sourceSessionId, includeChat, includeEvents,
+  transcript, transcripts, mtime }) {
   sources.set(sourceKey, { identity, revision: state.revision, established: true });
 
   const reset = requestedRevision
@@ -603,9 +615,9 @@ async function timelineFileFor(session, found, sourceKey, identity, since, reque
     session: { id: session.id, name: session.name, pwd: session.pwd },
     reset,
     source: {
-      provider: found.provider, transcript: stats.at(-1).file,
-      ...(files ? { transcripts: [...files] } : {}),
-      mtime: Math.max(...stats.map(({ stat: current }) => current.mtimeMs)),
+      provider: found.provider, transcript,
+      ...(transcripts ? { transcripts } : {}),
+      mtime,
       session_id: sourceSessionId ?? found.id, via: found.via, revision: state.revision,
       established: true,
       ...(agentId ? { agent_id: agentId } : {}),
@@ -616,11 +628,52 @@ async function timelineFileFor(session, found, sourceKey, identity, since, reque
   };
 }
 
+// A provider that owns its storage (e.g. OpenCode's SQLite database) syncs the
+// shared state itself: change detection, reading, and in-place updates all
+// happen inside provider.sync. The shared engine keeps identity, revisioning,
+// reset semantics, and snapshot projection.
+async function timelineStoreFor(session, provider, found, sourceKey, identity, since,
+  requestedRevision, agentId, sourceSessionId, includeChat = false, includeEvents = false) {
+  const previousSource = sources.get(sourceKey);
+  if (previousSource && previousSource.identity !== identity
+      && ![...sources].some(([id, source]) => id !== sourceKey && source.identity === previousSource.identity)) {
+    cache.delete(previousSource.identity);
+  }
+  let state = cache.get(identity);
+  if (!state) {
+    state = freshState(agentId, sourceSessionId);
+    cache.set(identity, state);
+  }
+  state.pending ??= (async () => {
+    const outcome = await provider.sync(found, state);
+    if (!outcome?.rebuild) return state;
+    const fresh = freshState(agentId, sourceSessionId);
+    cache.set(identity, fresh);
+    await provider.sync(found, fresh);
+    return fresh;
+  })().finally(() => { state.pending = null; });
+  state = await state.pending;
+  return finishTimeline({
+    session, found, state, sourceKey, identity, previousSource, since, requestedRevision,
+    agentId, sourceSessionId, includeChat, includeEvents,
+    transcript: found.store.key ?? null,
+    mtime: state.sourceMtime ?? null,
+  });
+}
+
 async function sessionTimelineFor(session, since, requestedRevision, includeChat = false) {
   const found = await locateTranscript(session);
   const base = { session: { id: session.id, name: session.name, pwd: session.pwd } };
-  const identity = JSON.stringify([found.provider, found.pid ?? null, found.id ?? null, found.file ?? null]);
+  const identity = JSON.stringify([found.provider, found.pid ?? null, found.id ?? null,
+    found.file ?? found.store?.key ?? null]);
   const previousSource = sources.get(session.id);
+  if (!found.file && found.store) {
+    const provider = await providerFor(session.harness);
+    if (typeof provider?.sync === 'function') {
+      return timelineStoreFor(session, provider, found, session.id, identity, since,
+        requestedRevision, undefined, found.id, includeChat);
+    }
+  }
   if (!found.file) {
     if (previousSource && previousSource.identity !== identity
         && ![...sources].some(([id, source]) => id !== session.id

@@ -9,7 +9,10 @@ export const CONFIG_DIR = process.env.VIBENCH_DIR || path.join(os.homedir(), '.v
 export const CONFIG_FILE = process.env.VIBENCH_CONFIG || path.join(CONFIG_DIR, 'config.json');
 
 const DEFAULTS = {
-  harnesses: [{ name: 'claude', cmd: 'claude', args: [] }],
+  harnesses: [
+    { name: 'claude', cmd: 'claude', args: [] },
+    { name: 'opencode', cmd: 'opencode', args: [] },
+  ],
 };
 
 export function loadConfig() {

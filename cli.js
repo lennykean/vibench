@@ -696,6 +696,9 @@ export async function main(argv = process.argv.slice(2)) {
   if (!picked.watchOnly && picked.harness.name === 'claude' && !hasProcessIdentitySupport()) {
     throw new Error('Claude session tracking requires Linux /proc or a procps-compatible ps');
   }
+  if (!picked.watchOnly && picked.harness.name !== 'claude') {
+    console.error(`warning: harness "${picked.harness.name}" launches without Vibench MCP tools`);
+  }
   try { execFileSync('tmux', tmuxArgs(['-V']), { stdio: 'pipe', windowsHide: true }); }
   catch { throw new Error('vibench needs tmux on PATH (on Windows: winget install marlocarlo.psmux)'); }
 
