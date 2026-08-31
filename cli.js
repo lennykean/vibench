@@ -118,8 +118,18 @@ function deployNvim(force, flavor = 'stock') {
       // nvim-treesitter can't rebuild them in this environment (tree-sitter
       // CLI spawn fails), so without them it retries the whole install,
       // noisily, on every single launch
+      // The user's site dir can hold absolute symlinks (nvim-treesitter query
+      // links); a stale seeded copy of those same links makes cpSync throw
+      // ERR_FS_CP_EINVAL before force applies. Reseed from scratch and copy
+      // the files the links point at, best-effort.
       const site = path.join(nvimDataDir('nvim'), 'site');
-      if (fs.existsSync(site)) fs.cpSync(site, path.join(nvimDataDir('vibench'), 'site'), { recursive: true, force: true });
+      if (fs.existsSync(site)) {
+        const seeded = path.join(nvimDataDir('vibench'), 'site');
+        try {
+          fs.rmSync(seeded, { recursive: true, force: true });
+          fs.cpSync(site, seeded, { recursive: true, dereference: true });
+        } catch { /* parser seeding is a convenience, not a requirement */ }
+      }
     }
   }
   // These are vibench-owned even in cloned profiles; refresh them every run.
