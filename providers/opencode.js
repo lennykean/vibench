@@ -38,6 +38,42 @@ export function resumeArgs(sessionId) {
   return ['--session', validateSessionId(sessionId)];
 }
 
+// OpenCode cannot pre-create a session, so spawned agents report their id
+// after launch: headless children print it in the --format json event stream,
+// and peers are found in the store by workspace and spawn time.
+export function spawnPlan(mode, prompt) {
+  return mode === 'subagent'
+    ? { args: ['run', '--format', 'json', prompt], discover: 'output' }
+    : { args: ['--prompt', prompt], discover: 'store' };
+}
+
+const sameDirectory = (left, right) => {
+  const normalizeDir = (value) => {
+    const text = String(value ?? '').replaceAll('\\', '/').replace(/\/+$/, '');
+    return process.platform === 'win32' ? text.toLowerCase() : text;
+  };
+  return normalizeDir(left) === normalizeDir(right);
+};
+
+export async function discoverSessionId({ output, workspace, after } = {}) {
+  const fromOutput = /\bses_[A-Za-z0-9]{8,128}\b/.exec(output ?? '')?.[0];
+  if (fromOutput) return fromOutput;
+  if (!sqlite() || typeof workspace !== 'string' || !workspace) return null;
+  const since = Date.parse(after ?? '') || 0;
+  let db;
+  try { db = openDatabase(databasePath()); } catch { return null; }
+  try {
+    const rows = db.prepare(
+      'select id, directory from session where time_created >= ? order by time_created limit 50',
+    ).all(since);
+    return rows.find((row) => sameDirectory(row.directory, workspace))?.id ?? null;
+  } catch {
+    return null;
+  } finally {
+    db.close();
+  }
+}
+
 export function databasePath(env = process.env, home = os.homedir()) {
   if (env.VIBENCH_OPENCODE_DB) return env.VIBENCH_OPENCODE_DB;
   const data = env.XDG_DATA_HOME || path.join(home, '.local', 'share');

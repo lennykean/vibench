@@ -523,3 +523,86 @@ test('streams a watch-only root and retained child through their lifecycle', asy
   assert.equal(replacementChild.reset, true);
   assert.equal(replacementChild.events[0].content, 'replacement child');
 });
+
+test('spawns, tracks, and reports subagents; refuses callbacks', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vibench-server-'));
+  const fixture = path.join(dir, 'fake-claude.js');
+  fs.writeFileSync(fixture, `
+    const args = process.argv.slice(2);
+    const prompt = args[args.indexOf('-p') + 1];
+    const sessionId = args[args.indexOf('--session-id') + 1];
+    if (!prompt || !sessionId) { console.error('bad args'); process.exit(2); }
+    console.log('answered: ' + prompt);
+  `);
+  const config = path.join(dir, 'config.json');
+  fs.writeFileSync(config, JSON.stringify({
+    harnesses: [{ name: 'claude', cmd: process.execPath, args: [fixture] }],
+  }));
+  const child = spawn(process.execPath, ['server.js'], {
+    cwd: here,
+    env: { ...process.env, VIBENCH_DIR: dir, VIBENCH_CONFIG: config },
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  let base; let token;
+  t.after(async () => {
+    if (child.exitCode === null) {
+      const closed = once(child, 'close');
+      try {
+        if (!base) throw new Error('server did not start');
+        await fetch(`${base}/kill`, { method: 'POST', headers: authorized(token) });
+      } catch { child.kill(); }
+      await closed;
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  ({ base, token } = await waitForServer(path.join(dir, 'server.json')));
+
+  const created = await (await fetch(`${base}/sessions`, {
+    method: 'POST',
+    headers: authorized(token, { 'content-type': 'application/json' }),
+    body: JSON.stringify({ name: 'parent', pwd: dir }),
+  })).json();
+
+  const refused = await fetch(`${base}/sessions/${created.id}/agents`, {
+    method: 'POST',
+    headers: authorized(token, { 'content-type': 'application/json' }),
+    body: JSON.stringify({ harness: 'claude', mode: 'subagent', prompt: 'hi', callback: true }),
+  });
+  assert.equal(refused.status, 400);
+  assert.match((await refused.json()).error, /no completion callback plugin/);
+
+  const unknown = await fetch(`${base}/sessions/${created.id}/agents`, {
+    method: 'POST',
+    headers: authorized(token, { 'content-type': 'application/json' }),
+    body: JSON.stringify({ harness: 'mystery', mode: 'subagent', prompt: 'hi' }),
+  });
+  assert.equal(unknown.status, 400);
+
+  const spawned = await fetch(`${base}/sessions/${created.id}/agents`, {
+    method: 'POST',
+    headers: authorized(token, { 'content-type': 'application/json' }),
+    body: JSON.stringify({ harness: 'claude', mode: 'subagent', prompt: 'count the beans' }),
+  });
+  assert.equal(spawned.status, 201);
+  const entry = await spawned.json();
+  assert.match(entry.agent_id, /^\w+$/);
+  assert.match(entry.harness_session_id, /^[0-9a-f-]{36}$/);
+  assert.equal(entry.mode, 'subagent');
+  assert.equal(entry.status, 'running');
+
+  let finished;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    finished = await (await fetch(`${base}/sessions/${created.id}/agents/${entry.agent_id}`, {
+      headers: authorized(token),
+    })).json();
+    if (finished.status !== 'running') break;
+    await sleep(100);
+  }
+  assert.equal(finished.status, 'completed');
+  assert.match(finished.result, /answered: count the beans/);
+  assert.equal(finished.exit, 0);
+
+  const persisted = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8'));
+  assert.equal(persisted[created.id].agents[0].status, 'completed');
+});

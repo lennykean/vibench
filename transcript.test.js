@@ -414,3 +414,34 @@ test('step responses are full snapshots only when the client is behind', () => {
   assert.deepEqual(readySnapshot(advanced, 1), []);
   assert.deepEqual(readySnapshot(advanced, 1, true).map(({ i }) => i), [0, 1]);
 });
+
+test('spawned agents appear as children with watchable timelines', async (t) => {
+  const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'vibench-agents-'));
+  process.env.VIBENCH_CLAUDE_PROJECTS = path.join(empty, 'projects');
+  t.after(() => {
+    delete process.env.VIBENCH_CLAUDE_PROJECTS;
+    fs.rmSync(empty, { recursive: true, force: true });
+  });
+  const { agentCatalog, agentTimelineFor } = await import('./transcript.js');
+  const session = {
+    id: 'par1', name: 'parent', pwd: empty, harness: 'claude',
+    agents: [{
+      agent_id: 'aabb', mode: 'subagent', harness: 'claude',
+      harness_session_id: '12345678-1234-4123-8123-1234567890ab',
+      description: 'do the thing', workspace: empty, status: 'completed',
+      spawned_at: '2026-08-31T00:00:00.000Z', ended_at: '2026-08-31T00:01:00.000Z',
+    }],
+  };
+  const catalog = await agentCatalog({ par1: session });
+  const child = catalog.roots[0].children.find((candidate) => candidate.id === 'aabb');
+  assert.equal(child.subtype, 'subagent');
+  assert.equal(child.model, 'claude');
+  assert.equal(child.status, 'completed');
+  assert.equal(child.live, false);
+  const timeline = await agentTimelineFor(session, 'child', 'aabb');
+  assert.equal(timeline.agent.id, 'aabb');
+  assert.equal(timeline.agent.subtype, 'subagent');
+  assert.equal(timeline.session.id, 'par1');
+  assert.deepEqual(timeline.steps, []);
+  assert.ok(timeline.source.reason);
+});

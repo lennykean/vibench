@@ -182,6 +182,8 @@ export function parseArgs(argv) {
     else if (a === '--watch-only') o.watchOnly = true;
     else if (a === '--no-watch') o.watch = false;
     else if (a === '--no-attach') o.attach = false;
+    // internal: extra harness launch arguments, used by peer spawning
+    else if (a === '--launch-arg') (o.launchArgs ??= []).push(argv[++i]);
     else if (a === 'ls') command('ls');
     else if (a === 'reset-nvim') command('reset-nvim');
     else if (a === '-l' || a === '--lazy') o.lazy = true;
@@ -244,6 +246,8 @@ export function launchOptions(config, args, cwd = process.cwd()) {
     harnessSessionId: args.session?.trim() ?? null,
     watchOnly: args.watchOnly === true,
     watch: args.watch !== false,
+    launchArgs: Array.isArray(args.launchArgs)
+      ? args.launchArgs.filter((value) => typeof value === 'string') : [],
   };
 }
 
@@ -725,6 +729,7 @@ export async function main(argv = process.argv.slice(2)) {
       launchArgs = provider.resumeArgs(picked.harnessSessionId);
     }
   }
+  launchArgs = [...launchArgs, ...picked.launchArgs];
   if (!picked.watchOnly && picked.harness.name === 'claude' && !hasProcessIdentitySupport()) {
     throw new Error('Claude session tracking requires Linux /proc or a procps-compatible ps');
   }

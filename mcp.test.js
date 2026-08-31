@@ -151,7 +151,7 @@ test('serves workspace_state for the inherited Vibench session', async (t) => {
   assert.equal(byId.get(1).result.serverInfo.name, 'vibench');
   assert.equal(byId.get(1).result.protocolVersion, '2025-06-18');
   assert.deepEqual(byId.get(1).result.capabilities, { tools: {} });
-  assert.deepEqual(byId.get(2).result.tools.map(({ name }) => name), ['workspace_state', 'run_table']);
+  assert.deepEqual(byId.get(2).result.tools.map(({ name }) => name), ['workspace_state', 'run_table', 'spawn_agent', 'wait_agent']);
   assert.deepEqual(byId.get(2).result.tools[1].inputSchema.required, ['script']);
   assert.equal(byId.get(2).result.tools[1].inputSchema.properties.format, undefined);
   assert.equal(byId.get(3).result.structuredContent.selection.text, 'picked');

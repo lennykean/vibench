@@ -60,6 +60,36 @@ const RUN_TABLE_TOOL = {
   annotations: { destructiveHint: true, openWorldHint: true },
 };
 
+const SPAWN_AGENT_TOOL = {
+  name: 'spawn_agent',
+  title: 'Spawn a Vibench agent',
+  description: 'Start another agent in any configured harness. mode "subagent" runs headless through the harness\'s non-interactive mode; mode "peer" runs as a full bench in its own tmux session. With sync true the call blocks until the subagent completes and returns its result; otherwise it returns the agent identity immediately and wait_agent collects the result. callback needs a harness plugin and fails clearly when unavailable.',
+  inputSchema: {
+    type: 'object', additionalProperties: false, required: ['harness', 'mode', 'prompt'],
+    properties: {
+      harness: { type: 'string', description: 'Configured harness name, for example "claude" or "opencode".' },
+      mode: { type: 'string', enum: ['subagent', 'peer'] },
+      prompt: { type: 'string', description: 'The task for the child agent.' },
+      workspace: { type: 'string', description: 'Working directory for the child. Defaults to this bench\'s workspace.' },
+      sync: { type: 'boolean', description: 'Block until the subagent completes and return its result. Subagents only.' },
+      callback: { type: 'boolean', description: 'Request a completion callback into this session.' },
+      timeout_seconds: { type: 'number', description: 'Sync wait limit in seconds. Default 600.' },
+    },
+  },
+};
+const WAIT_AGENT_TOOL = {
+  name: 'wait_agent',
+  title: 'Wait for a spawned agent',
+  description: 'Block until a spawned subagent completes, then return its result. Peers cannot be waited on yet.',
+  inputSchema: {
+    type: 'object', additionalProperties: false, required: ['agent_id'],
+    properties: {
+      agent_id: { type: 'string', description: 'The id spawn_agent returned.' },
+      timeout_seconds: { type: 'number', description: 'Wait limit in seconds. Default 300.' },
+    },
+  },
+};
+
 export function parseTsv(stdout) {
   const lines = String(stdout).replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n');
   const [columns, ...rows] = lines.map((line) => line.split('\t'));
@@ -163,6 +193,112 @@ function toolError(message) {
   return { content: [{ type: 'text', text: message }], isError: true };
 }
 
+function agentContext() {
+  const id = process.env.VIBENCH_SESSION;
+  if (!id || !/^\w+$/.test(id)) return { error: toolError('VIBENCH_SESSION is missing or invalid') };
+  const server = serverInfo();
+  if (!server) return { error: toolError('Vibench server is unavailable') };
+  return { id, server };
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function finishedAgent(entry) {
+  const summary = { agent_id: entry.agent_id, mode: entry.mode, harness: entry.harness,
+    harness_session_id: entry.harness_session_id ?? null, status: entry.status,
+    exit: entry.exit ?? null, result: entry.result ?? '' };
+  if (entry.status !== 'completed') {
+    return toolError(`agent ${entry.agent_id} ${entry.status}${entry.result ? `:\n${entry.result}` : ''}`);
+  }
+  return {
+    content: [{ type: 'text', text: entry.result || '(the agent produced no output)' }],
+    structuredContent: summary,
+  };
+}
+
+async function waitForAgent({ id, server }, agentId, timeoutSeconds) {
+  const limit = Number.isFinite(timeoutSeconds) && timeoutSeconds > 0
+    ? Math.min(timeoutSeconds, 3600) : 300;
+  const deadline = Date.now() + limit * 1000;
+  for (;;) {
+    let entry;
+    try {
+      const response = await fetch(
+        `${server.base}/sessions/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}`,
+        { headers: { authorization: `Bearer ${server.token}` }, signal: AbortSignal.timeout(5000) },
+      );
+      if (!response.ok) {
+        return toolError(`agent lookup failed (${response.status}): ${(await response.text()).slice(0, 200)}`);
+      }
+      entry = await response.json();
+    } catch (error) {
+      return toolError(`agent lookup failed: ${error.message}`);
+    }
+    if (entry.mode === 'peer') {
+      return toolError('peer completion tracking is not available yet; watch the peer bench instead');
+    }
+    if (entry.status !== 'running') return finishedAgent(entry);
+    if (Date.now() >= deadline) {
+      return toolError(`timed out after ${limit}s waiting for agent ${agentId} (still running)`);
+    }
+    await sleep(1500);
+  }
+}
+
+async function spawnAgentTool(args = {}) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return toolError('invalid arguments');
+  const context = agentContext();
+  if (context.error) return context.error;
+  if (args.sync === true && args.mode === 'peer') {
+    return toolError('peer completion tracking is not available yet; spawn peers async');
+  }
+  let response;
+  try {
+    response = await fetch(
+      `${context.server.base}/sessions/${encodeURIComponent(context.id)}/agents`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${context.server.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          harness: args.harness, mode: args.mode, prompt: args.prompt,
+          ...(args.workspace !== undefined ? { workspace: args.workspace } : {}),
+          ...(args.callback !== undefined ? { callback: args.callback } : {}),
+        }),
+        signal: AbortSignal.timeout(30_000),
+      },
+    );
+  } catch (error) {
+    return toolError(`spawn failed: ${error.message}`);
+  }
+  let entry;
+  try { entry = await response.json(); } catch { entry = null; }
+  if (!response.ok) {
+    return toolError(`spawn failed (${response.status}): ${entry?.error ?? 'unknown error'}`);
+  }
+  if (args.sync === true) return waitForAgent(context, entry.agent_id, args.timeout_seconds ?? 600);
+  const summary = {
+    agent_id: entry.agent_id, mode: entry.mode, harness: entry.harness,
+    harness_session_id: entry.harness_session_id ?? null, status: entry.status,
+  };
+  return {
+    content: [{ type: 'text', text: JSON.stringify(summary, null, 2) }],
+    structuredContent: summary,
+  };
+}
+
+async function waitAgentTool(args = {}) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)
+      || typeof args.agent_id !== 'string' || !/^\w+$/.test(args.agent_id)) {
+    return toolError('agent_id is required');
+  }
+  const context = agentContext();
+  if (context.error) return context.error;
+  return waitForAgent(context, args.agent_id, args.timeout_seconds);
+}
+
 function bash() {
   if (process.env.VIBENCH_BASH) return process.env.VIBENCH_BASH;
   if (process.platform !== 'win32') return 'bash';
@@ -224,11 +360,13 @@ async function handle(request) {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: { tools: {} },
       serverInfo: { name: 'vibench', version: VERSION },
-      instructions: "Use run_table for Bash commands whose stdout is tabular data. It must emit strict TSV: a unique non-empty header with at least two columns, at least one data row, and no ragged rows. Use workspace_state whenever the user refers to what is open, focused, visible, or selected in Neovim.",
+      instructions: "Use run_table for Bash commands whose stdout is tabular data. It must emit strict TSV: a unique non-empty header with at least two columns, at least one data row, and no ragged rows. Use workspace_state whenever the user refers to what is open, focused, visible, or selected in Neovim. Use spawn_agent to start another agent in any configured harness: mode subagent runs headless, mode peer opens its own bench; sync waits for the result, async returns an agent_id for wait_agent.",
     };
   }
   if (request.method === 'ping') return {};
-  if (request.method === 'tools/list') return { tools: [WORKSPACE_STATE_TOOL, RUN_TABLE_TOOL] };
+  if (request.method === 'tools/list') {
+    return { tools: [WORKSPACE_STATE_TOOL, RUN_TABLE_TOOL, SPAWN_AGENT_TOOL, WAIT_AGENT_TOOL] };
+  }
   if (request.method === 'tools/call') {
     if (request.params?.name === WORKSPACE_STATE_TOOL.name) {
       const args = request.params.arguments;
@@ -240,6 +378,12 @@ async function handle(request) {
     }
     if (request.params?.name === RUN_TABLE_TOOL.name) {
       return runTable(request.params.arguments);
+    }
+    if (request.params?.name === SPAWN_AGENT_TOOL.name) {
+      return spawnAgentTool(request.params.arguments);
+    }
+    if (request.params?.name === WAIT_AGENT_TOOL.name) {
+      return waitAgentTool(request.params.arguments);
     }
     throw Object.assign(new Error(`unknown tool: ${request.params?.name ?? ''}`), { code: -32602 });
   }

@@ -9,7 +9,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { agentCatalog, agentTimelineFor, forgetAgentSession, terminalFor } from './transcript.js';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { loadConfig } from './config.js';
+import { agentCatalog, agentTimelineFor, forgetAgentSession, providerFor, terminalFor } from './transcript.js';
 
 const DIR = process.env.VIBENCH_DIR || path.join(os.homedir(), '.vibench');
 const SERVER_FILE = path.join(DIR, 'server.json');
@@ -110,6 +113,163 @@ function hasServerToken(req) {
   const expected = `Bearer ${SERVER_TOKEN}`;
   return typeof supplied === 'string' && supplied.length === expected.length
     && crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
+}
+
+// ---- spawned agents: children started by an agent in a bench, either
+// headless (subagent) or as their own bench in a separate tmux session
+// (peer). Registry rows persist the entries; process handles stay here. ----
+
+const AGENT_OUTPUT_CAP = 64 * 1024;
+const spawnHandles = new Map();
+const CLI_ENTRY = fileURLToPath(new URL('./cli.js', import.meta.url));
+
+// A restarted server has no handle on previously spawned processes.
+for (const session of Object.values(sessions)) {
+  for (const agent of session.agents ?? []) {
+    if (agent.status === 'running' && agent.mode === 'subagent') agent.status = 'orphaned';
+  }
+}
+
+function spawnEnvironment() {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key === 'TMUX' || key === 'TMUX_PANE' || key.startsWith('VIBENCH_')) delete env[key];
+  }
+  if (process.env.VIBENCH_DIR) env.VIBENCH_DIR = process.env.VIBENCH_DIR;
+  if (process.env.VIBENCH_CONFIG) env.VIBENCH_CONFIG = process.env.VIBENCH_CONFIG;
+  if (process.env.VIBENCH_OPENCODE_DB) env.VIBENCH_OPENCODE_DB = process.env.VIBENCH_OPENCODE_DB;
+  if (process.env.VIBENCH_CLAUDE_SESSIONS) env.VIBENCH_CLAUDE_SESSIONS = process.env.VIBENCH_CLAUDE_SESSIONS;
+  if (process.env.VIBENCH_CLAUDE_PROJECTS) env.VIBENCH_CLAUDE_PROJECTS = process.env.VIBENCH_CLAUDE_PROJECTS;
+  return env;
+}
+
+const agentTitle = (prompt) => {
+  const text = String(prompt).replace(/\s+/g, ' ').trim();
+  return text.length > 60 ? `${text.slice(0, 59)}…` : text;
+};
+
+async function spawnAgent(session, body) {
+  const reject = (message) => { throw Object.assign(new Error(message), { status: 400 }); };
+  if (!body || typeof body !== 'object' || Array.isArray(body)) reject('invalid spawn request');
+  const { harness: harnessName, mode, prompt } = body;
+  if (!['subagent', 'peer'].includes(mode)) reject('mode must be "subagent" or "peer"');
+  if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 100_000) {
+    reject('prompt must be a non-empty string');
+  }
+  const harness = loadConfig().harnesses.find((entry) => entry.name === harnessName);
+  if (!harness) reject(`unknown harness "${harnessName}"`);
+  const provider = await providerFor(harnessName);
+  if (typeof provider?.spawnPlan !== 'function') {
+    reject(`harness "${harnessName}" cannot spawn agents`);
+  }
+  if (body.callback === true) {
+    reject(`no completion callback plugin is available for harness "${harnessName}"`);
+  }
+  const workspace = typeof body.workspace === 'string' && body.workspace ? body.workspace : session.pwd;
+  try {
+    if (!fs.statSync(workspace).isDirectory()) throw new Error();
+  } catch { reject(`workspace is not a directory: ${workspace}`); }
+
+  const agentId = crypto.randomBytes(4).toString('hex');
+  const plan = provider.spawnPlan(mode, prompt);
+  const entry = {
+    agent_id: agentId, mode, harness: harnessName,
+    harness_session_id: plan.sessionId ?? null,
+    description: agentTitle(prompt), workspace,
+    status: 'running', spawned_at: new Date().toISOString(),
+  };
+  const key = `${session.id}:${agentId}`;
+  const finish = (status, result, exit = null) => {
+    if (entry.status !== 'running') return;
+    entry.status = status;
+    entry.exit = exit;
+    entry.result = String(result ?? '').slice(-AGENT_OUTPUT_CAP);
+    entry.ended_at = new Date().toISOString();
+    spawnHandles.delete(key);
+    save();
+  };
+
+  let child;
+  if (mode === 'subagent') {
+    child = spawn(harness.cmd, [...(Array.isArray(harness.args) ? harness.args : []), ...plan.args], {
+      cwd: workspace, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      env: spawnEnvironment(), shell: false,
+    });
+  } else {
+    const peerSession = `vibench-peer-${agentId}`;
+    entry.tmux_session = peerSession;
+    const launch = plan.args.flatMap((value) => ['--launch-arg', value]);
+    child = spawn(process.execPath, [CLI_ENTRY,
+      '--workspace', workspace, '--model-harness', harnessName,
+      '--name', `peer-${agentId}`, '--no-attach', ...launch], {
+      cwd: workspace, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...spawnEnvironment(),
+        VIBENCH_TMUX_SOCKET: session.tmux?.socket || 'vibench',
+        VIBENCH_TMUX_SESSION: peerSession,
+      },
+    });
+  }
+  const handle = { child, output: '', errors: '' };
+  spawnHandles.set(key, handle);
+  entry.pid = child.pid ?? null;
+  child.stdout.on('data', (data) => {
+    handle.output = (handle.output + data).slice(-AGENT_OUTPUT_CAP);
+    if (!entry.harness_session_id && plan.discover === 'output'
+        && typeof provider.discoverSessionId === 'function') {
+      Promise.resolve(provider.discoverSessionId({ output: handle.output }))
+        .then((found) => {
+          if (found && !entry.harness_session_id) { entry.harness_session_id = found; save(); }
+        }).catch(() => {});
+    }
+  });
+  child.stderr.on('data', (data) => {
+    handle.errors = (handle.errors + data).slice(-AGENT_OUTPUT_CAP);
+  });
+  child.once('error', (error) => finish('failed', error.message));
+  child.once('exit', (code) => {
+    if (mode === 'subagent') {
+      const result = code === 0 ? handle.output.trim()
+        : [handle.output.trim(), handle.errors.trim()].filter(Boolean).join('\n');
+      finish(code === 0 ? 'completed' : 'failed', result, code);
+      return;
+    }
+    // The peer launcher exits after creating the bench; the peer itself
+    // keeps running in its own tmux session.
+    if (code !== 0) {
+      finish('failed', [handle.output.trim(), handle.errors.trim()].filter(Boolean).join('\n'), code);
+      return;
+    }
+    const bench = Object.values(sessions).find((candidate) =>
+      (entry.harness_session_id && candidate.harness === harnessName
+        && candidate.harness_session_id === entry.harness_session_id)
+      || candidate.name === `peer-${agentId}`);
+    if (bench) entry.bench_id = bench.id;
+    spawnHandles.delete(key);
+    save();
+  });
+
+  session.agents ??= [];
+  session.agents.push(entry);
+  save();
+  return entry;
+}
+
+async function refreshAgent(session, entry) {
+  if (entry.harness_session_id || !entry.workspace) return;
+  try {
+    const provider = await providerFor(entry.harness);
+    if (typeof provider?.discoverSessionId !== 'function') return;
+    const found = await provider.discoverSessionId({
+      output: spawnHandles.get(`${session.id}:${entry.agent_id}`)?.output,
+      workspace: entry.workspace,
+      after: entry.spawned_at,
+    });
+    if (found && !entry.harness_session_id) {
+      entry.harness_session_id = found;
+      save();
+    }
+  } catch { /* discovery is best-effort; the entry stays reachable */ }
 }
 
 function streamSignature(body) {
@@ -247,6 +407,8 @@ const server = http.createServer(async (req, res) => {
   const childAgentSelect = /^\/agents\/child\/([A-Za-z0-9_-]{1,128})\/([A-Za-z0-9_-]{1,128})\/select$/.exec(url.pathname);
   const rootAgentTimeline = /^\/agents\/root\/([A-Za-z0-9_-]{1,128})\/timeline$/.exec(url.pathname)?.[1];
   const childAgentTimeline = /^\/agents\/child\/([A-Za-z0-9_-]{1,128})\/([A-Za-z0-9_-]{1,128})\/timeline$/.exec(url.pathname);
+  const agentsOf = /^\/sessions\/(\w+)\/agents$/.exec(url.pathname)?.[1];
+  const agentOf = /^\/sessions\/(\w+)\/agents\/(\w+)$/.exec(url.pathname);
   const terminalEventsId = /^\/sessions\/(\w+)\/terminal\/events$/.exec(url.pathname)?.[1];
   const terminalId = /^\/sessions\/(\w+)\/terminal$/.exec(url.pathname)?.[1];
   const workbenchId = /^\/sessions\/(\w+)\/workbench$/.exec(url.pathname)?.[1];
@@ -366,6 +528,29 @@ const server = http.createServer(async (req, res) => {
       const body = await agentTimelineFor(session, 'child', childAgentTimeline[2], query.since, query.revision);
       return body ? send(200, body) : send(404, { error: 'unknown child agent' });
     } catch (error) { return send(500, { error: error.message }); }
+  }
+  if (req.method === 'POST' && agentsOf) {
+    const session = sessions[agentsOf];
+    if (!session) return send(404, { error: 'unknown session' });
+    try {
+      return send(201, await spawnAgent(session, await requestJson(req)));
+    } catch (error) {
+      return send(error.status ?? 500, { error: error.message });
+    }
+  }
+  if (req.method === 'GET' && agentsOf) {
+    const session = sessions[agentsOf];
+    if (!session) return send(404, { error: 'unknown session' });
+    for (const entry of session.agents ?? []) await refreshAgent(session, entry);
+    return send(200, { agents: session.agents ?? [] });
+  }
+  if (req.method === 'GET' && agentOf) {
+    const session = sessions[agentOf[1]];
+    if (!session) return send(404, { error: 'unknown session' });
+    const entry = (session.agents ?? []).find((agent) => agent.agent_id === agentOf[2]);
+    if (!entry) return send(404, { error: 'unknown agent' });
+    await refreshAgent(session, entry);
+    return send(200, entry);
   }
   if (req.method === 'GET' && url.pathname === '/sessions' && !url.search) return send(200, sessions);
   if (req.method === 'GET' && terminalEventsId) {

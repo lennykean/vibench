@@ -96,8 +96,10 @@ export async function processTable() {
     try {
       if (process.platform === 'win32') {
         const script = '$rows=@(Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{Pid=$_.ProcessId;Parent=$_.ParentProcessId} }); $starts=@{}; Get-Process -ErrorAction SilentlyContinue | ForEach-Object { try { $d=$_.StartTime; $u=$d.ToUniversalTime(); $starts[[int]$_.Id]=@($u.ToFileTimeUtc(),$d.Ticks,$u.Ticks,([DateTimeOffset]$d).ToUnixTimeMilliseconds()) } catch {} }; $rows | ForEach-Object { $values=@($_.Pid,$_.Parent); if ($starts.ContainsKey([int]$_.Pid)) { $values += $starts[[int]$_.Pid] }; $values -join [char]9 }';
+        // ponytail: a loaded machine can take >10s for the full sweep; the
+        // result is cached and single-flighted, so pay for it once.
         const output = await runAsync('powershell.exe',
-          ['-NoProfile', '-NonInteractive', '-Command', script], 10000);
+          ['-NoProfile', '-NonInteractive', '-Command', script], 30_000);
         for (const line of output.split(/\r?\n/)) {
           const [rawPid, rawParent, ...starts] = line.trim().split('\t');
           const pid = Number(rawPid);
@@ -722,7 +724,7 @@ function mergeChild(children, value, parentAgentId) {
 }
 
 function publicChild(rootId, child) {
-  const terminal = /^(completed|failed|stopped|cancelled|killed)$/i.test(child.status ?? '');
+  const terminal = /^(completed|failed|stopped|cancelled|killed|orphaned)$/i.test(child.status ?? '');
   const timeline = `/agents/child/${encodeURIComponent(rootId)}/${encodeURIComponent(child.id)}/timeline`;
   return {
     kind: 'child', id: child.id, root_id: rootId,
@@ -764,6 +766,17 @@ async function catalogSession(session, body = null) {
     : [];
 
   for (const child of discovered) mergeChild(children, child);
+  for (const spawned of session.agents ?? []) {
+    mergeChild(children, {
+      id: spawned.agent_id,
+      description: spawned.description ?? null,
+      subtype: spawned.mode ?? null,
+      model: spawned.harness ?? null,
+      status: spawned.status ?? null,
+      spawned_at: spawned.spawned_at ?? null,
+      ...(spawned.ended_at ? { ended_at: spawned.ended_at } : {}),
+    });
+  }
   for (const child of state?.children?.values() ?? []) mergeChild(children, child);
   for (const [id, childState] of state?.sidechains ?? []) {
     mergeChild(children, {
@@ -882,6 +895,32 @@ export async function agentTimelineFor(session, kind, childId, since, requestedR
     } };
   }
   if (kind !== 'child' || !validAgentId(childId)) return null;
+  // A vibench-spawned agent (subagent or peer, any harness) has a known
+  // session identity, so its timeline is an ordinary watch of that session.
+  const spawned = (session.agents ?? []).find((agent) => agent.agent_id === childId);
+  if (spawned) {
+    const synthetic = {
+      id: `${session.id}:agent:${childId}`,
+      name: spawned.description || childId,
+      pwd: spawned.workspace ?? session.pwd,
+      harness: spawned.harness,
+      watch_only: true,
+      harness_session_id: spawned.harness_session_id ?? null,
+    };
+    const body = await sessionTimelineFor(synthetic, since, requestedRevision, true);
+    const source = sources.get(synthetic.id);
+    return {
+      ...body,
+      session: { id: session.id, name: session.name, pwd: session.pwd },
+      events: cache.get(source?.identity)?.events ?? [],
+      agent: publicChild(session.id, {
+        id: childId,
+        description: spawned.description ?? null, subtype: spawned.mode ?? null,
+        model: spawned.harness ?? null, status: spawned.status ?? null,
+        spawned_at: spawned.spawned_at ?? null, ended_at: spawned.ended_at ?? null,
+      }),
+    };
+  }
   const rootBody = await terminalFor(session, Number.MAX_SAFE_INTEGER);
   const identity = sources.get(session.id)?.identity;
   let targets = agentTargets.get(session.id);

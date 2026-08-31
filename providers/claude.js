@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,6 +14,15 @@ export function validateSessionId(sessionId) {
 }
 export function resumeArgs(sessionId) {
   return ['--resume', validateSessionId(sessionId)];
+}
+// Claude accepts a caller-chosen session id, so spawned agents are known-id
+// from the start: headless children run under -p, peers get the id plus the
+// prompt as launch arguments for the interactive TUI.
+export function spawnPlan(mode, prompt) {
+  const sessionId = crypto.randomUUID();
+  return mode === 'subagent'
+    ? { sessionId, args: ['-p', prompt, '--session-id', sessionId] }
+    : { sessionId, args: ['--session-id', sessionId, prompt] };
 }
 const sessions = () => process.env.VIBENCH_CLAUDE_SESSIONS || path.join(os.homedir(), '.claude', 'sessions');
 const projects = () => process.env.VIBENCH_CLAUDE_PROJECTS || path.join(os.homedir(), '.claude', 'projects');
