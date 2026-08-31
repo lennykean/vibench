@@ -13,7 +13,14 @@ import { harnessLine, writeMcpConfig } from './mcp.js';
 import { cleanupOwnedHost, ownedHostTarget, windowOwnerKey, windowWatchKey } from './tmux-host.js';
 import { parseProcStat, providerFor, SOURCE_MISS_MS } from './transcript.js';
 
-const TMUX_SOCKET = process.env.VIBENCH_TMUX_SOCKET || 'vibench';
+// Inside a foreign tmux (a wezterm-managed server, say), adopt that server's
+// socket so benches become sibling sessions it can switch-client to. $TMUX is
+// "<socket path>,<server pid>,<session index>"; -L names are socket basenames.
+export function ambientSocket(env = process.env) {
+  const socketPath = (env.TMUX || '').split(',')[0];
+  return socketPath ? path.basename(socketPath) : null;
+}
+const TMUX_SOCKET = process.env.VIBENCH_TMUX_SOCKET || ambientSocket() || 'vibench';
 const tmuxArgs = (args) => ['-L', TMUX_SOCKET, ...args];
 const tmux = (...args) => execFileSync('tmux', tmuxArgs(args), { encoding: 'utf8', windowsHide: true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -577,14 +584,34 @@ export function cleanupCreatedWindow(run, launch, id) {
   return true;
 }
 
+// Attaching decisions, from where the command runs:
+// - plain shell: attach-session on the bench socket (a top-level client).
+// - inside tmux on the SAME socket as the bench: switch-client, never nest.
+// - inside tmux on a DIFFERENT socket: refuse with the exact command, because
+//   a client cannot switch to a session on another server and nesting a
+//   client inside a pane helps nobody.
+export function attachPlan(target, env = process.env) {
+  if (!env.TMUX) return { args: ['attach-session', '-t', `=${target.session}`], dropTmux: true };
+  if (ambientSocket(env) === target.socket) {
+    return { args: ['switch-client', '-t', `=${target.session}`] };
+  }
+  return {
+    refusal: `bench is on tmux socket "${target.socket}" but this pane is on `
+      + `"${ambientSocket(env)}"; run this from a plain shell or use: `
+      + `tmux -L ${target.socket} attach-session -t =${target.session}`,
+  };
+}
+
 function attach(target = { socket: TMUX_SOCKET, session: TMUX_SESSION }) {
-  const ownClient = process.env.TMUX && process.env.VIBENCH_TMUX_SOCKET === target.socket;
-  const args = ownClient
-    ? ['switch-client', '-t', `=${target.session}`]
-    : ['attach-session', '-t', `=${target.session}`];
+  const plan = attachPlan(target);
+  if (plan.refusal) {
+    console.error(plan.refusal);
+    process.exitCode = 1;
+    return;
+  }
   const env = { ...process.env };
-  if (!ownClient) delete env.TMUX;
-  const r = spawnSync('tmux', ['-L', target.socket, ...args], { stdio: 'inherit', windowsHide: true, env });
+  if (plan.dropTmux) delete env.TMUX;
+  const r = spawnSync('tmux', ['-L', target.socket, ...plan.args], { stdio: 'inherit', windowsHide: true, env });
   process.exitCode = r.status ?? 0;
 }
 

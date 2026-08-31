@@ -279,3 +279,24 @@ test('partial host cleanup kills only the matching stable session id', () => {
   assert.equal(cleanupOwnedHost(concurrent, ownedHostTarget(concurrent, 'vibench', 'ours'), 'ours'), false);
   assert.equal(killed, false);
 });
+
+test('ambientSocket derives the -L name from $TMUX', async () => {
+  const { ambientSocket } = await import('./cli.js');
+  assert.equal(ambientSocket({ TMUX: '/tmp/tmux-501/default,4242,0' }), 'default');
+  assert.equal(ambientSocket({ TMUX: '/tmp/psmux-1/vibench,52848,0' }), 'vibench');
+  assert.equal(ambientSocket({}), null);
+});
+
+test('attachPlan never nests: attach, switch, or refuse', async () => {
+  const { attachPlan } = await import('./cli.js');
+  const target = { socket: 'vibench', session: 'vibench' };
+  const plain = attachPlan(target, {});
+  assert.deepEqual(plain.args, ['attach-session', '-t', '=vibench']);
+  assert.equal(plain.dropTmux, true);
+  const sibling = attachPlan(target, { TMUX: '/tmp/tmux-501/vibench,10,0' });
+  assert.deepEqual(sibling.args, ['switch-client', '-t', '=vibench']);
+  const foreign = attachPlan(target, { TMUX: '/tmp/tmux-501/default,10,0' });
+  assert.equal(foreign.args, undefined);
+  assert.match(foreign.refusal, /socket "vibench".*"default"/);
+  assert.match(foreign.refusal, /tmux -L vibench attach-session -t =vibench/);
+});
