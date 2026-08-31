@@ -1,6 +1,11 @@
 local M = {}
 local drawers = { 'vibench_agentterm', 'vibench_toolinfo', 'vibench_data' }
 local group = vim.api.nvim_create_augroup('VibenchLayout', { clear = true })
+-- A mouse drag on the drawer border is a WinResized with no layout churn:
+-- remember that height instead of snapping back. WinNew/WinClosed churn
+-- restores the remembered (or configured) height.
+local heights = {}
+local churn = false
 
 local function current_window(win)
   return win and vim.api.nvim_win_is_valid(win)
@@ -70,7 +75,7 @@ function M.claim_drawer(owner)
   end
 end
 
-function M.pin_drawer()
+function M.pin_drawer(adopt)
   pin_explorer()
   for _, item in ipairs({
     { name = 'vibench_agentterm', height = vim.g.vibench_agentterm_height },
@@ -80,8 +85,13 @@ function M.pin_drawer()
     local panel = vim.g[item.name]
     local state = type(panel) == 'table' and type(panel.state) == 'function' and panel.state() or nil
     if state and current_window(state.window) then
-      local height = math.max(1, math.floor(tonumber(item.height) or 15))
-      pcall(vim.api.nvim_win_set_height, state.window, height)
+      local configured = math.max(1, math.floor(tonumber(item.height) or 15))
+      if adopt then
+        local live = vim.api.nvim_win_get_height(state.window)
+        if live >= 1 then heights[item.name] = live end
+      else
+        pcall(vim.api.nvim_win_set_height, state.window, heights[item.name] or configured)
+      end
       vim.wo[state.window].winfixheight = true
       return
     end
@@ -105,9 +115,25 @@ vim.api.nvim_create_autocmd('BufWinEnter', {
   end,
 })
 
-vim.api.nvim_create_autocmd({ 'WinNew', 'WinClosed', 'WinResized' }, {
+vim.api.nvim_create_autocmd({ 'WinNew', 'WinClosed' }, {
   group = group,
-  callback = function() vim.schedule(M.pin_drawer) end,
+  callback = function()
+    churn = true
+    vim.schedule(function()
+      churn = false
+      M.pin_drawer(false)
+    end)
+  end,
+})
+-- WinNew and WinClosed fire before their consequent WinResized, so churn is
+-- already set here when the resize came from layout changes rather than the
+-- user's mouse.
+vim.api.nvim_create_autocmd('WinResized', {
+  group = group,
+  callback = function()
+    if churn then return end
+    vim.schedule(function() M.pin_drawer(true) end)
+  end,
 })
 
 return M
