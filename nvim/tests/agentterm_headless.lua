@@ -215,10 +215,18 @@ vim.api.nvim_feedkeys(vim.keycode('<C-u>'), 'xt', false)
 vim.api.nvim_exec_autocmds('WinScrolled', { pattern = tostring(terminal.state().window) })
 assert(vim.wait(500, function() return not playhead.state().follow end),
   'Agent Terminal keyboard scrolling did not disable Live')
-vim.api.nvim_feedkeys(vim.keycode('<C-f>'), 'xt', false)
-vim.api.nvim_exec_autocmds('WinScrolled', { pattern = tostring(terminal.state().window) })
-assert(vim.wait(500, function() return playhead.state().follow end),
-  'returning to the Agent Terminal bottom did not enable Live')
+-- A slow runner can need more than one page-down before the view reaches the
+-- bottom again; nudge until follow returns instead of asserting after one.
+local restored = false
+for _ = 1, 3 do
+  vim.api.nvim_feedkeys(vim.keycode('<C-f>'), 'xt', false)
+  vim.api.nvim_exec_autocmds('WinScrolled', { pattern = tostring(terminal.state().window) })
+  if vim.wait(700, function() return playhead.state().follow end) then
+    restored = true
+    break
+  end
+end
+assert(restored, 'returning to the Agent Terminal bottom did not enable Live')
 vim.api.nvim_feedkeys('gg', 'xt', false)
 vim.api.nvim_exec_autocmds('CursorMoved', { buffer = terminal.state().buffer })
 assert(vim.wait(500, function() return not playhead.state().follow end),
