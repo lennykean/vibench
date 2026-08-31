@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,14 +14,25 @@ export function validateSessionId(sessionId) {
 export function resumeArgs(sessionId) {
   return ['--resume', validateSessionId(sessionId)];
 }
-// Claude accepts a caller-chosen session id, so spawned agents are known-id
-// from the start: headless children run under -p, peers get the id plus the
-// prompt as launch arguments for the interactive TUI.
+// Never pre-generate a Claude session id: it poisons the session history.
+// Vibench spawned the process, so it knows the pid, and Claude publishes the
+// authoritative id in its pid record at startup — read it from there.
 export function spawnPlan(mode, prompt) {
-  const sessionId = crypto.randomUUID();
   return mode === 'subagent'
-    ? { sessionId, args: ['-p', prompt, '--session-id', sessionId] }
-    : { sessionId, args: ['--session-id', sessionId, prompt] };
+    ? { args: ['-p', prompt], discover: 'record' }
+    : { args: [prompt], discover: 'record' };
+}
+
+export async function discoverSessionId({ pid } = {}) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  try {
+    const record = JSON.parse(
+      await fs.promises.readFile(path.join(sessions(), `${pid}.json`), 'utf8'));
+    if (record?.pid !== pid || typeof record.sessionId !== 'string' || !record.sessionId.trim()) {
+      return null;
+    }
+    return record.sessionId;
+  } catch { return null; }
 }
 const sessions = () => process.env.VIBENCH_CLAUDE_SESSIONS || path.join(os.homedir(), '.claude', 'sessions');
 const projects = () => process.env.VIBENCH_CLAUDE_PROJECTS || path.join(os.homedir(), '.claude', 'projects');

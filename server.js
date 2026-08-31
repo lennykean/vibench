@@ -226,6 +226,24 @@ async function spawnAgent(session, body) {
   child.stderr.on('data', (data) => {
     handle.errors = (handle.errors + data).slice(-AGENT_OUTPUT_CAP);
   });
+  if (mode === 'subagent' && plan.discover === 'record'
+      && typeof provider.discoverSessionId === 'function') {
+    // Claude publishes the authoritative session id in its pid record at
+    // startup; poll it while the child runs and briefly after it exits.
+    const poll = setInterval(() => {
+      if (entry.harness_session_id) { clearInterval(poll); return; }
+      Promise.resolve(provider.discoverSessionId({ pid: child.pid }))
+        .then((found) => {
+          if (found && !entry.harness_session_id) {
+            entry.harness_session_id = found;
+            clearInterval(poll);
+            save();
+          }
+        }).catch(() => {});
+    }, 500);
+    poll.unref?.();
+    child.once('exit', () => { setTimeout(() => clearInterval(poll), 5000).unref?.(); });
+  }
   child.once('error', (error) => finish('failed', error.message));
   child.once('exit', (code) => {
     if (mode === 'subagent') {
@@ -256,18 +274,31 @@ async function spawnAgent(session, body) {
 }
 
 async function refreshAgent(session, entry) {
-  if (entry.harness_session_id || !entry.workspace) return;
+  if (entry.harness_session_id) return;
   try {
     const provider = await providerFor(entry.harness);
-    if (typeof provider?.discoverSessionId !== 'function') return;
-    const found = await provider.discoverSessionId({
-      output: spawnHandles.get(`${session.id}:${entry.agent_id}`)?.output,
-      workspace: entry.workspace,
-      after: entry.spawned_at,
-    });
-    if (found && !entry.harness_session_id) {
-      entry.harness_session_id = found;
-      save();
+    const handle = spawnHandles.get(`${session.id}:${entry.agent_id}`);
+    if (typeof provider?.discoverSessionId === 'function') {
+      const found = await provider.discoverSessionId({
+        pid: handle?.child?.pid,
+        output: handle?.output,
+        workspace: entry.workspace,
+        after: entry.spawned_at,
+      });
+      if (found) {
+        entry.harness_session_id = found;
+        save();
+        return;
+      }
+    }
+    // A peer is a full bench; once linked, its own session matching is the
+    // source of truth for the harness session id.
+    if (entry.bench_id && sessions[entry.bench_id]) {
+      const found = (await terminalFor(sessions[entry.bench_id]))?.source?.session_id;
+      if (found && !entry.harness_session_id) {
+        entry.harness_session_id = found;
+        save();
+      }
     }
   } catch { /* discovery is best-effort; the entry stays reachable */ }
 }

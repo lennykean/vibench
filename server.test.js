@@ -527,11 +527,18 @@ test('streams a watch-only root and retained child through their lifecycle', asy
 test('spawns, tracks, and reports subagents; refuses callbacks', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vibench-server-'));
   const fixture = path.join(dir, 'fake-claude.js');
+  const records = path.join(dir, 'claude-sessions');
   fs.writeFileSync(fixture, `
+    const fs = require('fs');
+    const path = require('path');
     const args = process.argv.slice(2);
     const prompt = args[args.indexOf('-p') + 1];
-    const sessionId = args[args.indexOf('--session-id') + 1];
-    if (!prompt || !sessionId) { console.error('bad args'); process.exit(2); }
+    if (!prompt || args.includes('--session-id')) { console.error('bad args'); process.exit(2); }
+    const dir = process.env.VIBENCH_CLAUDE_SESSIONS;
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, process.pid + '.json'), JSON.stringify({
+      pid: process.pid, sessionId: 'fixture-session-1234', cwd: process.cwd(),
+    }));
     console.log('answered: ' + prompt);
   `);
   const config = path.join(dir, 'config.json');
@@ -540,7 +547,10 @@ test('spawns, tracks, and reports subagents; refuses callbacks', async (t) => {
   }));
   const child = spawn(process.execPath, ['server.js'], {
     cwd: here,
-    env: { ...process.env, VIBENCH_DIR: dir, VIBENCH_CONFIG: config },
+    env: {
+      ...process.env, VIBENCH_DIR: dir, VIBENCH_CONFIG: config,
+      VIBENCH_CLAUDE_SESSIONS: records,
+    },
     stdio: 'ignore',
     windowsHide: true,
   });
@@ -587,21 +597,22 @@ test('spawns, tracks, and reports subagents; refuses callbacks', async (t) => {
   assert.equal(spawned.status, 201);
   const entry = await spawned.json();
   assert.match(entry.agent_id, /^\w+$/);
-  assert.match(entry.harness_session_id, /^[0-9a-f-]{36}$/);
+  assert.equal(entry.harness_session_id, null);
   assert.equal(entry.mode, 'subagent');
   assert.equal(entry.status, 'running');
 
   let finished;
-  for (let attempt = 0; attempt < 50; attempt++) {
+  for (let attempt = 0; attempt < 80; attempt++) {
     finished = await (await fetch(`${base}/sessions/${created.id}/agents/${entry.agent_id}`, {
       headers: authorized(token),
     })).json();
-    if (finished.status !== 'running') break;
+    if (finished.status !== 'running' && finished.harness_session_id) break;
     await sleep(100);
   }
   assert.equal(finished.status, 'completed');
   assert.match(finished.result, /answered: count the beans/);
   assert.equal(finished.exit, 0);
+  assert.equal(finished.harness_session_id, 'fixture-session-1234');
 
   const persisted = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8'));
   assert.equal(persisted[created.id].agents[0].status, 'completed');
