@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   publish:
@@ -34,11 +35,12 @@ jobs:
           fi
           echo "Publishing version $VERSION"
 
+      # trusted publishing (OIDC) needs npm >= 11.5.1; node 22 bundles npm 10
+      - run: npm install -g npm@latest
+
       - run: npm ci
 
       - name: Publish package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -o pipefail
           if ! npm publish --access public 2>&1 | tee /tmp/publish-out; then
