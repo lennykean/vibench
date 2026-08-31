@@ -1,0 +1,1 @@
+-- Options here load before plugins. LazyVim defaults apply otherwise.
