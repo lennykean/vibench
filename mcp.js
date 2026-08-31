@@ -285,5 +285,10 @@ export async function startMcp() {
   await Promise.allSettled(inFlight);
 }
 
-const normalize = (file) => process.platform === 'win32' ? path.resolve(file).toLowerCase() : path.resolve(file);
+// realpath both sides: macOS symlinks path prefixes, so resolve-only
+// comparison can miss and leave the MCP silently inert.
+const normalize = (file) => {
+  try { file = fs.realpathSync(file); } catch { /* keep the given path */ }
+  return process.platform === 'win32' ? path.resolve(file).toLowerCase() : path.resolve(file);
+};
 if (process.argv[1] && normalize(process.argv[1]) === normalize(ENTRYPOINT)) await startMcp();

@@ -5,8 +5,15 @@ import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
 export const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'vibench-test-'));
+// Strip the ambient bench identity: tests run from inside a vibench pane
+// otherwise inherit TMUX_PANE and VIBENCH_* values that make nested psmux
+// panes and session resolution lie (see the psmux env-bleed issue).
+const ambient = { ...process.env };
+for (const key of Object.keys(ambient)) {
+  if (key === 'TMUX' || key === 'TMUX_PANE' || key.startsWith('VIBENCH_')) delete ambient[key];
+}
 export const testEnv = {
-  ...process.env,
+  ...ambient,
   VIBENCH_DIR: path.join(testRoot, 'registry'),
   LOCALAPPDATA: path.join(testRoot, 'local-app-data'),
   XDG_CONFIG_HOME: path.join(testRoot, 'xdg-config'),

@@ -247,11 +247,16 @@ export function launchOptions(config, args, cwd = process.cwd()) {
   };
 }
 
+// macOS symlinks whole path prefixes (/tmp -> /private/tmp, manager-owned
+// bins), so equality needs realpath on BOTH sides before normalizing.
+export const canonicalPath = (value) => {
+  try { value = fs.realpathSync(value); } catch { /* keep the given path */ }
+  return process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+};
+
 const samePath = (left, right) => {
   if (typeof left !== 'string' || typeof right !== 'string') return false;
-  const normalizePath = (value) => process.platform === 'win32'
-    ? path.resolve(value).toLowerCase() : path.resolve(value);
-  return normalizePath(left) === normalizePath(right);
+  return canonicalPath(left) === canonicalPath(right);
 };
 
 export function existingBench(registry, harnessName, harnessSessionId, watchOnly, workspace, live = () => true) {
@@ -812,8 +817,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (args.attach) attach();
 }
 
-const normalize = (file) => process.platform === 'win32' ? path.resolve(file).toLowerCase() : path.resolve(file);
-if (process.argv[1] && normalize(process.argv[1]) === normalize(fileURLToPath(import.meta.url))) {
+if (process.argv[1] && canonicalPath(process.argv[1]) === canonicalPath(fileURLToPath(import.meta.url))) {
   try { await main(); }
   catch (error) { console.error(`${error.message}\n${USAGE}`); process.exitCode = 1; }
 }
