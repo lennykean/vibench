@@ -637,7 +637,7 @@ async function ls() {
   const live = (session) => {
     const socket = session.tmux?.socket || TMUX_SOCKET;
     const run = (...args) => execFileSync('tmux', ['-L', socket, ...args], {
-      encoding: 'utf8', windowsHide: true,
+      encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
     });
     return !!ownedBenchPane(session, run);
   };
