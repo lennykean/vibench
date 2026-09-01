@@ -909,6 +909,8 @@ local view_buffer = agentview.state().buffer
 assert(view_buffer and vim.api.nvim_buf_is_valid(view_buffer), 'agent view buffer is missing')
 assert(vim.fn.buflisted(view_buffer) == 1 and vim.bo[view_buffer].buftype == 'nofile',
   'agent view is not a listed nofile buffer')
+assert(vim.b[view_buffer].snacks_main == true,
+  'agent view window is not a snacks main target; picker jumps land in a winfixbuf drawer (E1513)')
 assert(vim.bo[view_buffer].bufhidden == 'hide' and vim.bo[view_buffer].readonly
     and not vim.bo[view_buffer].modifiable and not vim.bo[view_buffer].swapfile
     and not vim.bo[view_buffer].modified,

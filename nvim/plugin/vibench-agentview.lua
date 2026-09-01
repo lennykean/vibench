@@ -284,6 +284,9 @@ local function ensure_buffer()
   vim.bo[created].swapfile = false
   vim.bo[created].readonly = true
   vim.bo[created].modifiable = false
+  -- snacks skips nofile windows when picking where to open a file; without this
+  -- it falls back to a winfixbuf drawer and :buffer fails with E1513
+  vim.b[created].snacks_main = true
   playhead.attach(created)
   playhead.map_if_free(created, 'n', 'q', close, { silent = true, desc = 'Close Agent View' })
   playhead.map_if_free(created, 'n', 'gf', open_live_file, { silent = true, desc = 'Open live file' })
