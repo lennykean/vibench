@@ -48,3 +48,19 @@ export function cleanupOwnedHost(tmux, target, id) {
     return true;
   } catch { return false; }
 }
+
+// tmux forbids : and . in window names; collapse whitespace runs too.
+export function sanitizeWindowName(name) {
+  return String(name ?? '').replace(/[.:\s]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+// The bench window follows the harness session's name until the user renames
+// the window by hand: `expected` is what vibench last set, so a live name that
+// differs means the user took over and the window is theirs from then on.
+export function windowRenamePlan({ current, expected, desired }) {
+  const wanted = sanitizeWindowName(desired);
+  if (!wanted || !current || !expected) return null;
+  if (current !== expected) return null;
+  if (wanted === current) return null;
+  return { name: wanted };
+}

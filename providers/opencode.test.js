@@ -152,6 +152,7 @@ test('locate needs a known id and an existing session row', { skip: !available }
   const found = await locate({ session: { harness_session_id: SESSION_ID } });
   assert.deepEqual(found, {
     store: { key: file, id: SESSION_ID }, id: SESSION_ID, via: 'session-id',
+    session_name: 'calm-fox',
   });
 
   process.env.VIBENCH_OPENCODE_DB = path.join(dir, 'absent.db');

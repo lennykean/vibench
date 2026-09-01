@@ -625,6 +625,7 @@ function finishTimeline({ session, found, state, sourceKey, identity, previousSo
       mtime,
       session_id: sourceSessionId ?? found.id, via: found.via, revision: state.revision,
       established: true,
+      ...(found.session_name ? { session_name: found.session_name } : {}),
       ...(agentId ? { agent_id: agentId } : {}),
       ...(found.reason ? { reason: found.reason } : {}),
     },
@@ -708,6 +709,7 @@ async function sessionTimelineFor(session, since, requestedRevision, includeChat
       source: {
         provider: found.provider, transcript: null, mtime: null, session_id: found.id ?? null,
         via: found.via ?? null, reason: found.reason, revision,
+        ...(found.session_name ? { session_name: found.session_name } : {}),
         established: source.established === true,
         missing_confirmed: source.established === true && Date.now() - source.missingAt >= SOURCE_MISS_MS,
       },

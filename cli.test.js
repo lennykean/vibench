@@ -300,3 +300,19 @@ test('attachPlan never nests: attach, switch, or refuse', async () => {
   assert.match(foreign.refusal, /socket "vibench".*"default"/);
   assert.match(foreign.refusal, /tmux -L vibench attach-session -t =vibench/);
 });
+
+test('window rename follows the session until the user renames', async () => {
+  const { sanitizeWindowName, windowRenamePlan } = await import('./tmux-host.js');
+  assert.equal(sanitizeWindowName('mr typer'), 'mr-typer');
+  assert.equal(sanitizeWindowName('a.b:c  d'), 'a-b-c-d');
+  assert.deepEqual(
+    windowRenamePlan({ current: 'vibench', expected: 'vibench', desired: 'mr typer' }),
+    { name: 'mr-typer' });
+  // user renamed the window by hand: never touch it again
+  assert.equal(windowRenamePlan({ current: 'my window', expected: 'vibench', desired: 'mr typer' }), null);
+  // already correct
+  assert.equal(windowRenamePlan({ current: 'mr-typer', expected: 'mr-typer', desired: 'mr typer' }), null);
+  // nothing to go on
+  assert.equal(windowRenamePlan({ current: 'vibench', expected: 'vibench', desired: '' }), null);
+  assert.equal(windowRenamePlan({ current: 'vibench', expected: null, desired: 'x' }), null);
+});

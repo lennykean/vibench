@@ -490,10 +490,19 @@ export async function locate({ session, processes = [] }) {
   const file = path.join(projects(), slug(record.cwd), `${record.sessionId}.jsonl`);
   try {
     if ((await fs.promises.stat(file)).isFile()) {
-      return { file, id: record.sessionId, pid: record.pid, via: 'pid-session' };
+      return {
+        file, id: record.sessionId, pid: record.pid, via: 'pid-session',
+        ...(typeof record.name === 'string' && record.name.trim()
+          ? { session_name: record.name.trim() } : {}),
+      };
     }
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  return { id: record.sessionId, pid: record.pid, via: 'pid-session', reason: 'transcript not yet created' };
+  return {
+    id: record.sessionId, pid: record.pid, via: 'pid-session',
+    reason: 'transcript not yet created',
+    ...(typeof record.name === 'string' && record.name.trim()
+      ? { session_name: record.name.trim() } : {}),
+  };
 }
 
 export function consume(line, state) {

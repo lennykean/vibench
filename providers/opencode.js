@@ -127,9 +127,14 @@ export async function locate({ session }) {
   try { db = openDatabase(file); }
   catch { return { id, reason: `no OpenCode database at ${file}` }; }
   try {
-    const row = db.prepare('select id from session where id = ?').get(id);
+    const row = db.prepare('select id, title, slug from session where id = ?').get(id);
     if (!row) return { id, reason: 'no matching OpenCode session' };
-    return { store: { key: file, id }, id, via: 'session-id' };
+    const label = typeof row.slug === 'string' && row.slug ? row.slug
+      : typeof row.title === 'string' && row.title ? row.title : null;
+    return {
+      store: { key: file, id }, id, via: 'session-id',
+      ...(label ? { session_name: label } : {}),
+    };
   } catch {
     return { id, reason: 'unsupported OpenCode database schema' };
   } finally {

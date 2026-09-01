@@ -9,9 +9,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.js';
+import { windowRenamePlan } from './tmux-host.js';
 import { agentCatalog, agentTimelineFor, forgetAgentSession, providerFor, terminalFor } from './transcript.js';
 
 const DIR = process.env.VIBENCH_DIR || path.join(os.homedir(), '.vibench');
@@ -129,6 +131,7 @@ function withRegistryLock(fn) {
   return run;
 }
 const CLI_ENTRY = fileURLToPath(new URL('./cli.js', import.meta.url));
+const execFileAsync = promisify(execFile);
 
 // A restarted server has no handle on previously spawned processes.
 {
@@ -383,7 +386,42 @@ function rememberEstablishedSource(session, established) {
 
 function rememberTimelineSource(session, body) {
   if (rememberEstablishedSource(session, body?.source?.established)) save();
+  maintainWindowName(session, body?.source?.session_name);
   return body;
+}
+
+// ---- window naming: the bench window follows the harness session's name
+// until the user renames it by hand (detected because the live name no longer
+// matches what vibench last set). Throttled; failures are ignored. ----
+
+const WINDOW_NAME_INTERVAL_MS = 5000;
+const windowNameChecks = new Map();
+
+function maintainWindowName(session, sessionName) {
+  const windowId = session?.tmux?.harness?.window_id ?? session?.tmux?.nvim?.window_id;
+  if (!sessionName || !windowId) return;
+  const now = Date.now();
+  if (now - (windowNameChecks.get(session.id) ?? 0) < WINDOW_NAME_INTERVAL_MS) return;
+  windowNameChecks.set(session.id, now);
+  void (async () => {
+    const socket = session.tmux?.socket || 'vibench';
+    const tmux = (...args) => execFileAsync('tmux', ['-L', socket, ...args], {
+      encoding: 'utf8', windowsHide: true, timeout: 5000,
+    }).then(({ stdout }) => stdout.trim());
+    try {
+      const current = await tmux('display-message', '-p', '-t', windowId, '#{window_name}');
+      const expected = session.window_name_set
+        ?? session.tmux?.harness?.window_name ?? session.tmux?.nvim?.window_name;
+      const plan = windowRenamePlan({ current, expected, desired: sessionName });
+      if (!plan) return;
+      await tmux('rename-window', '-t', windowId, plan.name);
+      if (sessions[session.id] !== session) return;
+      session.window_name_set = plan.name;
+      if (session.tmux?.harness) session.tmux.harness.window_name = plan.name;
+      if (session.tmux?.nvim) session.tmux.nvim.window_name = plan.name;
+      save();
+    } catch { /* the window can be gone or the server busy; try again later */ }
+  })();
 }
 
 function streamTerminal(req, res, url, id) {
