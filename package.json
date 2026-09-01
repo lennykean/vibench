@@ -1,6 +1,6 @@
 {
   "name": "agent-vibench",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "A tmux launcher for agent sessions: Neovim beside an agent harness, one session id tying them together",
   "type": "module",
   "bin": {
