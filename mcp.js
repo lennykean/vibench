@@ -128,7 +128,14 @@ export function harnessLine(harness, shell, file = mcpConfigFile(), launchArgs =
   const quote = (value) => {
     const text = String(value);
     if (/^[\w./:@=-]+$/.test(text)) return text;
-    if (shellName === 'cmd') return `"${text.replaceAll('"', '""')}"`;
+    if (shellName === 'cmd') {
+      // cmd.exe expands %VAR% even inside double quotes and submits on every
+      // newline byte; there is no safe way to type such text into it.
+      if (/[%\r\n]/.test(text)) {
+        throw new Error('cannot safely pass text with % or newlines through a cmd.exe pane; use a PowerShell or bash pane');
+      }
+      return `"${text.replaceAll('"', '""')}"`;
+    }
     return shellName === 'pwsh' || shellName === 'powershell'
       ? `'${text.replaceAll("'", "''")}'`
       : `'${text.replaceAll("'", `'\\''`)}'`;
@@ -247,6 +254,15 @@ async function waitForAgent({ id, server }, agentId, timeoutSeconds) {
 
 async function spawnAgentTool(args = {}) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return toolError('invalid arguments');
+  if (typeof args.harness !== 'string' || !args.harness) return toolError('harness is required');
+  if (!['subagent', 'peer'].includes(args.mode)) return toolError('mode must be "subagent" or "peer"');
+  if (typeof args.prompt !== 'string' || !args.prompt.trim()) return toolError('prompt is required');
+  if (args.workspace !== undefined && typeof args.workspace !== 'string') {
+    return toolError('workspace must be a string');
+  }
+  if (args.timeout_seconds !== undefined && !(Number(args.timeout_seconds) > 0)) {
+    return toolError('timeout_seconds must be a positive number');
+  }
   const context = agentContext();
   if (context.error) return context.error;
   if (args.sync === true && args.mode === 'peer') {

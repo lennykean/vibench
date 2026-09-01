@@ -170,7 +170,7 @@ local function land(landing, steps)
   if landing.saved then playhead.restore(landing.saved)
   elseif landing.mode == 'live' then playhead.set_follow(true)
   elseif landing.mode == 'end' then playhead.finish()
-  else playhead.seek(closest_position(steps, landing.at), false) end
+  else playhead.land(closest_position(steps, landing.at)) end
 end
 
 local function ingest(payload)

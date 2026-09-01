@@ -300,10 +300,12 @@ local function ordinary_window()
   local toolinfo = panel_window('vibench_toolinfo')
   local data = panel_window('vibench_data')
   local tools = panel_window('vibench_tools')
+  local chat = panel_window('vibench_chat')
   local best, column, area
   for _, candidate in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     if current_win(candidate) and candidate ~= window and candidate ~= terminal
         and candidate ~= scrubber and candidate ~= toolinfo and candidate ~= data and candidate ~= tools
+        and candidate ~= chat
         and vim.api.nvim_win_get_config(candidate).relative == ''
         and vim.fn.win_gettype(vim.api.nvim_win_get_number(candidate)) == '' then
       local candidate_column = vim.api.nvim_win_get_position(candidate)[2]

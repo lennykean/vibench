@@ -74,6 +74,7 @@ async function reapExpiredReservations(now = Date.now()) {
     if (session.launching !== true
         || Number.isFinite(started) && now - started < LAUNCH_RESERVATION_MS) continue;
     delete sessions[session.id];
+    releaseAgents(session);
     workbenches.delete(session.id);
     const selection = agentSelections.get(session.id);
     if (selection) finishAgentSelection(session.id, selection, false);
@@ -121,12 +122,40 @@ function hasServerToken(req) {
 
 const AGENT_OUTPUT_CAP = 64 * 1024;
 const spawnHandles = new Map();
+let registryLock = Promise.resolve();
+function withRegistryLock(fn) {
+  const run = registryLock.then(fn, fn);
+  registryLock = run.then(() => {}, () => {});
+  return run;
+}
 const CLI_ENTRY = fileURLToPath(new URL('./cli.js', import.meta.url));
 
 // A restarted server has no handle on previously spawned processes.
-for (const session of Object.values(sessions)) {
-  for (const agent of session.agents ?? []) {
-    if (agent.status === 'running' && agent.mode === 'subagent') agent.status = 'orphaned';
+{
+  let changed = false;
+  for (const session of Object.values(sessions)) {
+    for (const agent of session.agents ?? []) {
+      if (agent.status === 'running' && agent.mode === 'subagent') {
+        agent.status = 'orphaned';
+        changed = true;
+      }
+    }
+  }
+  if (changed) save();
+}
+
+// Deleting or reaping a session must not leak its children: kill running
+// subagent processes and drop their handles and discovery timers.
+function releaseAgents(session) {
+  for (const agent of session?.agents ?? []) {
+    const key = `${session.id}:${agent.agent_id}`;
+    const handle = spawnHandles.get(key);
+    if (!handle) continue;
+    if (handle.poll) clearInterval(handle.poll);
+    if (agent.mode === 'subagent' && agent.status === 'running') {
+      try { handle.child.kill(); } catch { /* already gone */ }
+    }
+    spawnHandles.delete(key);
   }
 }
 
@@ -141,6 +170,14 @@ function spawnEnvironment() {
   if (process.env.VIBENCH_CLAUDE_SESSIONS) env.VIBENCH_CLAUDE_SESSIONS = process.env.VIBENCH_CLAUDE_SESSIONS;
   if (process.env.VIBENCH_CLAUDE_PROJECTS) env.VIBENCH_CLAUDE_PROJECTS = process.env.VIBENCH_CLAUDE_PROJECTS;
   return env;
+}
+
+// Session ids already claimed by sibling spawned agents: discovery must not
+// attribute the same harness session to two entries.
+function claimedSessionIds(session, entry) {
+  return (session.agents ?? [])
+    .filter((sibling) => sibling !== entry && sibling.harness_session_id)
+    .map((sibling) => sibling.harness_session_id);
 }
 
 const agentTitle = (prompt) => {
@@ -215,12 +252,16 @@ async function spawnAgent(session, body) {
   entry.pid = child.pid ?? null;
   child.stdout.on('data', (data) => {
     handle.output = (handle.output + data).slice(-AGENT_OUTPUT_CAP);
-    if (!entry.harness_session_id && plan.discover === 'output'
+    if (!entry.harness_session_id && !handle.discovering && plan.discover === 'output'
         && typeof provider.discoverSessionId === 'function') {
-      Promise.resolve(provider.discoverSessionId({ output: handle.output }))
+      handle.discovering = true;
+      Promise.resolve(provider.discoverSessionId({
+        output: handle.output, exclude: claimedSessionIds(session, entry),
+      }))
         .then((found) => {
           if (found && !entry.harness_session_id) { entry.harness_session_id = found; save(); }
-        }).catch(() => {});
+        }).catch(() => {})
+        .finally(() => { handle.discovering = false; });
     }
   });
   child.stderr.on('data', (data) => {
@@ -242,6 +283,7 @@ async function spawnAgent(session, body) {
         }).catch(() => {});
     }, 500);
     poll.unref?.();
+    handle.poll = poll;
     child.once('exit', () => { setTimeout(() => clearInterval(poll), 5000).unref?.(); });
   }
   child.once('error', (error) => finish('failed', error.message));
@@ -267,6 +309,14 @@ async function spawnAgent(session, body) {
     save();
   });
 
+  // The session can be deleted while the spawn body was validated and the
+  // process created; never attach a child to an evicted registry row.
+  if (sessions[session.id] !== session) {
+    if (handle.poll) clearInterval(handle.poll);
+    try { child.kill(); } catch { /* already gone */ }
+    spawnHandles.delete(key);
+    throw Object.assign(new Error('session was deleted during spawn'), { status: 409 });
+  }
   session.agents ??= [];
   session.agents.push(entry);
   save();
@@ -274,6 +324,18 @@ async function spawnAgent(session, body) {
 }
 
 async function refreshAgent(session, entry) {
+  // A peer's bench can register after the launcher exits; keep retrying the
+  // link until it appears.
+  if (entry.mode === 'peer' && !entry.bench_id) {
+    const bench = Object.values(sessions).find((candidate) =>
+      (entry.harness_session_id && candidate.harness === entry.harness
+        && candidate.harness_session_id === entry.harness_session_id)
+      || candidate.name === `peer-${entry.agent_id}`);
+    if (bench) {
+      entry.bench_id = bench.id;
+      save();
+    }
+  }
   if (entry.harness_session_id) return;
   try {
     const provider = await providerFor(entry.harness);
@@ -284,6 +346,7 @@ async function refreshAgent(session, entry) {
         output: handle?.output,
         workspace: entry.workspace,
         after: entry.spawned_at,
+        exclude: claimedSessionIds(session, entry),
       });
       if (found) {
         entry.harness_session_id = found;
@@ -561,10 +624,13 @@ const server = http.createServer(async (req, res) => {
     } catch (error) { return send(500, { error: error.message }); }
   }
   if (req.method === 'POST' && agentsOf) {
-    const session = sessions[agentsOf];
-    if (!session) return send(404, { error: 'unknown session' });
+    if (!sessions[agentsOf]) return send(404, { error: 'unknown session' });
     try {
-      return send(201, await spawnAgent(session, await requestJson(req)));
+      const body = await requestJson(req);
+      // Re-read after the body await: the session can vanish while it streams.
+      const session = sessions[agentsOf];
+      if (!session) return send(404, { error: 'unknown session' });
+      return send(201, await spawnAgent(session, body));
     } catch (error) {
       return send(error.status ?? 500, { error: error.message });
     }
@@ -653,7 +719,10 @@ const server = http.createServer(async (req, res) => {
     workbenches.delete(idOf);
     const selection = agentSelections.get(idOf);
     if (selection) finishAgentSelection(idOf, selection, false);
-    if (removed) await forgetAgentSession(removed);
+    if (removed) {
+      releaseAgents(removed);
+      await forgetAgentSession(removed);
+    }
     save();
     return send(200, { ok: true });
   }
@@ -665,8 +734,13 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'POST' && req.url === '/sessions') {
     try {
       const incoming = await requestJson(req);
+      // Two launches can race the claim-or-create search; serialize it so the
+      // same harness session never gets two registry rows.
+      return await withRegistryLock(async () => {
       const { name, pwd } = incoming;
       if (typeof incoming.id === 'string' && sessions[incoming.id]) {
+        // agents entries are server-owned; a client merge must not corrupt them
+        delete incoming.agents;
         sessions[incoming.id] = { ...sessions[incoming.id], ...incoming };
         save();
         return send(200, sessions[incoming.id]);
@@ -702,6 +776,7 @@ const server = http.createServer(async (req, res) => {
       };
       save();
       return send(201, sessions[id]);
+      });
     } catch (e) {
       return send(e.status ?? 400, { error: e.message });
     }

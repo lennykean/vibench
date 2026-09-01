@@ -4,8 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
-  databasePath, locate, parseReadOutput, parseUnifiedDiff, resumeArgs, sqliteSupported, sync,
-  validateSessionId,
+  databasePath, discoverChildren, discoverSessionId, locate, parseReadOutput, parseUnifiedDiff,
+  resumeArgs, sqliteSupported, sync, validateSessionId,
 } from './opencode.js';
 import { terminalFor } from '../transcript.js';
 
@@ -23,15 +23,16 @@ async function makeDb(file) {
   const { DatabaseSync } = await import('node:sqlite');
   const db = new DatabaseSync(file);
   db.exec(`
-    create table session (id text primary key, directory text,
-      time_created integer, time_updated integer);
+    create table session (id text primary key, parent_id text, directory text,
+      title text, slug text, time_created integer, time_updated integer);
     create table message (id text primary key, session_id text,
       time_created integer, time_updated integer, data text);
     create table part (id text primary key, message_id text, session_id text,
       time_created integer, time_updated integer, data text);
   `);
-  db.prepare('insert into session values (?, ?, ?, ?)')
-    .run(SESSION_ID, '/work/demo', 1000, 2000);
+  const insertSession = db.prepare('insert into session values (?, ?, ?, ?, ?, ?, ?)');
+  insertSession.run(SESSION_ID, null, '/work/demo', 'parent work', 'calm-fox', 1000, 2000);
+  insertSession.run('ses_child0001abc', SESSION_ID, '/work/demo', 'child research', 'tiny-owl', 1500, 1900);
   const message = db.prepare('insert into message values (?, ?, ?, ?, ?)');
   const part = db.prepare('insert into part values (?, ?, ?, ?, ?, ?)');
   message.run('m1', SESSION_ID, 1000, 1000, JSON.stringify({ role: 'user', time: { created: 1000 } }));
@@ -266,4 +267,44 @@ test('terminalFor serves an OpenCode session end to end', { skip: !available }, 
   const patch = body.steps.find((step) => step.kind === 'patch');
   assert.equal(patch.content, 'alpha\ndelta\ngamma');
   assert.deepEqual(patch.region, { start_line: 2, end_line: 2 });
+});
+
+test('parseReadOutput accepts CRLF content blocks', () => {
+  assert.deepEqual(parseReadOutput('<content>\r\n1: alpha\r\n2: beta\r\n</content>'),
+    { content: 'alpha\nbeta', start: 1, count: 2 });
+});
+
+test('discoverSessionId prefers the structured field and honors exclusions', { skip: !available }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vibench-oc-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'opencode.db');
+  await makeDb(file);
+  process.env.VIBENCH_OPENCODE_DB = file;
+  t.after(() => { delete process.env.VIBENCH_OPENCODE_DB; });
+
+  const output = 'prompt mentions ses_decoy000abc then {"sessionID":"ses_realone0abc"}';
+  assert.equal(await discoverSessionId({ output }), 'ses_realone0abc');
+  assert.equal(await discoverSessionId({ output: 'bare ses_bare0000abc only' }), 'ses_bare0000abc');
+  assert.equal(await discoverSessionId({
+    output: 'bare ses_bare0000abc only', exclude: ['ses_bare0000abc'],
+  }), null);
+  assert.equal(await discoverSessionId({
+    workspace: '/work/demo', after: '1970-01-01T00:00:00Z',
+  }), SESSION_ID);
+  assert.equal(await discoverSessionId({
+    workspace: '/work/demo', after: '1970-01-01T00:00:00Z', exclude: [SESSION_ID],
+  }), 'ses_child0001abc');
+});
+
+test('discoverChildren lists sessions spawned by the root', { skip: !available }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vibench-oc-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'opencode.db');
+  await makeDb(file);
+  const children = await discoverChildren(file, SESSION_ID);
+  assert.equal(children.length, 1);
+  assert.equal(children[0].id, 'ses_child0001abc');
+  assert.equal(children[0].description, 'child research');
+  assert.ok(children[0].started_at);
+  assert.deepEqual(await discoverChildren(file, 'ses_child0001abc'), []);
 });

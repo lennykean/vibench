@@ -595,6 +595,9 @@ async function timelineFileFor(session, found, sourceKey, identity, since, reque
 function finishTimeline({ session, found, state, sourceKey, identity, previousSource, since,
   requestedRevision, agentId, sourceSessionId, includeChat, includeEvents,
   transcript, transcripts, mtime }) {
+  // ponytail: unconditional last-write-wins; two overlapping polls straddling
+  // an identity change can write a stale entry, which self-heals on the next
+  // tick via the revision mismatch. Serialize per sourceKey if it ever shows.
   sources.set(sourceKey, { identity, revision: state.revision, established: true });
 
   const reset = requestedRevision
@@ -646,14 +649,26 @@ async function timelineStoreFor(session, provider, found, sourceKey, identity, s
     state = freshState(agentId, sourceSessionId);
     cache.set(identity, state);
   }
-  state.pending ??= (async () => {
-    const outcome = await provider.sync(found, state);
-    if (!outcome?.rebuild) return state;
-    const fresh = freshState(agentId, sourceSessionId);
-    cache.set(identity, fresh);
-    await provider.sync(found, fresh);
-    return fresh;
-  })().finally(() => { state.pending = null; });
+  if (!state.pending) {
+    const started = state;
+    const inFlight = (async () => {
+      const outcome = await provider.sync(found, started);
+      if (!outcome?.rebuild) return started;
+      const fresh = freshState(agentId, sourceSessionId);
+      // Publish the fresh state already marked busy: a concurrent tick that
+      // reads the cache mid-rebuild must await this sync, not start its own.
+      fresh.pending = inFlight;
+      cache.set(identity, fresh);
+      await provider.sync(found, fresh);
+      return fresh;
+    })();
+    started.pending = inFlight;
+    inFlight.then(
+      (settled) => { settled.pending = null; started.pending = null; },
+      () => { started.pending = null; const current = cache.get(identity);
+        if (current?.pending === inFlight) current.pending = null; },
+    );
+  }
   state = await state.pending;
   return finishTimeline({
     session, found, state, sourceKey, identity, previousSource, since, requestedRevision,
@@ -755,14 +770,29 @@ function inferredSpawnPosition(steps, child) {
   return (steps?.length ?? 0) + 1;
 }
 
-async function catalogSession(session, body = null) {
+// Per-panel poll loops can call catalogSession concurrently for one session;
+// its read-modify-write on agentTargets (and the dropSource cleanup) must not
+// interleave, or a stale call can evict entries a fresher call just made.
+const catalogLocks = new Map();
+function withCatalogLock(id, fn) {
+  const previous = catalogLocks.get(id) ?? Promise.resolve();
+  const run = previous.then(fn, fn);
+  catalogLocks.set(id, run.then(() => {}, () => {}));
+  return run;
+}
+
+function catalogSession(session, body = null) {
+  return withCatalogLock(session.id, () => catalogSessionLocked(session, body));
+}
+
+async function catalogSessionLocked(session, body = null) {
   body ??= await terminalFor(session);
   const source = sources.get(session.id);
   const state = source && cache.get(source.identity);
   const children = new Map();
   const provider = await providerFor(session.harness);
   const discovered = body.source.transcript && provider?.discoverChildren
-    ? await provider.discoverChildren(body.source.transcript)
+    ? await provider.discoverChildren(body.source.transcript, body.source.session_id)
     : [];
 
   for (const child of discovered) mergeChild(children, child);
@@ -859,8 +889,10 @@ export async function agentCatalog(registry) {
 export async function forgetAgentSession(session) {
   const targets = agentTargets.get(session.id);
   agentTargets.delete(session.id);
+  catalogLocks.delete(session.id);
   for (const key of [...sources.keys()]) {
-    if (key === session.id || key.startsWith(`${session.id}:child:`)) dropSource(key);
+    if (key === session.id || key.startsWith(`${session.id}:child:`)
+        || key.startsWith(`${session.id}:agent:`)) dropSource(key);
   }
   if (!targets?.transcript) return;
   try {
@@ -918,6 +950,36 @@ export async function agentTimelineFor(session, kind, childId, since, requestedR
         description: spawned.description ?? null, subtype: spawned.mode ?? null,
         model: spawned.harness ?? null, status: spawned.status ?? null,
         spawned_at: spawned.spawned_at ?? null, ended_at: spawned.ended_at ?? null,
+      }),
+    };
+  }
+  // A store provider's native children are sessions themselves: watch the
+  // child session directly by its id.
+  const storeProvider = await providerFor(session.harness);
+  if (typeof storeProvider?.sync === 'function') {
+    if (typeof storeProvider.discoverChildren !== 'function') return null;
+    const children = await storeProvider.discoverChildren(null, session.harness_session_id);
+    const child = children.find((candidate) => candidate.id === childId);
+    if (!child) return null;
+    const synthetic = {
+      id: `${session.id}:child:${childId}`,
+      name: child.description || childId,
+      pwd: session.pwd,
+      harness: session.harness,
+      watch_only: true,
+      harness_session_id: childId,
+    };
+    const body = await sessionTimelineFor(synthetic, since, requestedRevision, true);
+    const source = sources.get(synthetic.id);
+    return {
+      ...body,
+      session: { id: session.id, name: session.name, pwd: session.pwd },
+      events: cache.get(source?.identity)?.events ?? [],
+      agent: publicChild(session.id, {
+        id: childId,
+        description: child.description ?? null,
+        spawned_at: child.started_at ?? null,
+        last_at: child.last_at ?? null,
       }),
     };
   }

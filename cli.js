@@ -205,7 +205,8 @@ export function parseArgs(argv) {
   if (o.watchOnly && !o.session) throw new Error('--watch-only requires --session');
   if ((o.lazy || o.clone) && o.command !== 'reset-nvim') throw new Error('--lazy and --clone are only valid with reset-nvim');
   if (o.lazy && o.clone) throw new Error('--lazy and --clone are mutually exclusive');
-  if (o.command && [o.workspace, o.modelHarness, o.name, o.session, o.watchOnly, o.watch === false, !o.attach]
+  if (o.command && [o.workspace, o.modelHarness, o.name, o.session, o.watchOnly, o.watch === false,
+    !o.attach, o.launchArgs?.length]
     .some(Boolean)) throw new Error(`launch options are not valid with ${o.command}`);
   return o;
 }
@@ -372,10 +373,15 @@ async function acquireTmuxLaunchLock() {
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
       try {
-        const owner = Number(fs.readFileSync(TMUX_LAUNCH_LOCK, 'utf8').split(':', 1)[0]);
+        const stale = fs.readFileSync(TMUX_LAUNCH_LOCK, 'utf8');
+        const owner = Number(stale.split(':', 1)[0]);
         let alive = Number.isInteger(owner) && owner > 0;
         try { if (alive) process.kill(owner, 0); } catch (probe) { alive = probe.code === 'EPERM'; }
-        if (!alive) fs.unlinkSync(TMUX_LAUNCH_LOCK);
+        // Re-check the content before deleting: another waiter can have
+        // cleaned the stale lock and acquired a fresh one in the meantime.
+        if (!alive && fs.readFileSync(TMUX_LAUNCH_LOCK, 'utf8') === stale) {
+          fs.unlinkSync(TMUX_LAUNCH_LOCK);
+        }
       } catch (probe) { if (probe.code !== 'ENOENT') throw probe; }
       await sleep(50);
     }

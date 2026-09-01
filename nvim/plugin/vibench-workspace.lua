@@ -280,6 +280,16 @@ vim.api.nvim_create_autocmd({
   'WinEnter', 'WinNew', 'WinClosed', 'WinScrolled',
 }, { group = group, callback = queue })
 vim.api.nvim_create_autocmd('ModeChanged', { group = group, callback = mode_changed })
+-- Buffer numbers get reused after a wipeout; a cached selection must not keep
+-- pointing its numeric handle at whatever buffer inherits the number.
+vim.api.nvim_create_autocmd('BufWipeout', {
+  group = group,
+  callback = function(args)
+    if last_selection and last_selection.buffer == args.buf then
+      last_selection.buffer = nil
+    end
+  end,
+})
 vim.api.nvim_create_autocmd('User', {
   group = group,
   pattern = 'VibenchPlayheadChanged',

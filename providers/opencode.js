@@ -55,9 +55,15 @@ const sameDirectory = (left, right) => {
   return normalizeDir(left) === normalizeDir(right);
 };
 
-export async function discoverSessionId({ output, workspace, after } = {}) {
+export async function discoverSessionId({ output, workspace, after, exclude } = {}) {
+  const excluded = new Set(Array.isArray(exclude) ? exclude : []);
+  // Prefer the structured sessionID field from the --format json event
+  // stream; a bare ses_ substring can also appear in nested task output or
+  // echoed prompt text.
+  const structured = /"sessionID"\s*:\s*"(ses_[A-Za-z0-9]{8,128})"/.exec(output ?? '')?.[1];
+  if (structured && !excluded.has(structured)) return structured;
   const fromOutput = /\bses_[A-Za-z0-9]{8,128}\b/.exec(output ?? '')?.[0];
-  if (fromOutput) return fromOutput;
+  if (fromOutput && !excluded.has(fromOutput)) return fromOutput;
   if (!sqlite() || typeof workspace !== 'string' || !workspace) return null;
   const since = Date.parse(after ?? '') || 0;
   let db;
@@ -66,9 +72,32 @@ export async function discoverSessionId({ output, workspace, after } = {}) {
     const rows = db.prepare(
       'select id, directory from session where time_created >= ? order by time_created limit 50',
     ).all(since);
-    return rows.find((row) => sameDirectory(row.directory, workspace))?.id ?? null;
+    return rows.find((row) => !excluded.has(row.id)
+      && sameDirectory(row.directory, workspace))?.id ?? null;
   } catch {
     return null;
+  } finally {
+    db.close();
+  }
+}
+
+// OpenCode's native subagents (the task tool) are sessions with parent_id set
+// to the spawning session; the store links them directly.
+export async function discoverChildren(databaseFile, rootSessionId) {
+  if (typeof rootSessionId !== 'string' || !rootSessionId || !sqlite()) return [];
+  let db;
+  try { db = openDatabase(databaseFile || databasePath()); } catch { return []; }
+  try {
+    return db.prepare(
+      'select id, title, slug, time_created, time_updated from session where parent_id = ? order by time_created limit 200',
+    ).all(rootSessionId).map((row) => ({
+      id: row.id,
+      description: row.title || row.slug || row.id,
+      started_at: isoTime(row.time_created),
+      last_at: isoTime(row.time_updated),
+    }));
+  } catch {
+    return [];
   } finally {
     db.close();
   }
@@ -178,6 +207,7 @@ function fail(step, error) {
 // OpenCode read output wraps the file in <content> tags with "N: " line
 // numbers. Reconstruct the raw lines so shared anchoring can use them.
 export function parseReadOutput(output) {
+  output = String(output).replace(/\r\n/g, '\n');
   const open = output.indexOf('<content>');
   const close = output.lastIndexOf('</content>');
   if (open < 0 || close <= open) return null;

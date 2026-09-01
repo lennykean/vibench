@@ -84,9 +84,10 @@ local function ordinary_window()
   local scrubber = panel_window('vibench_scrubber')
   local toolinfo = panel_window('vibench_toolinfo')
   local data = panel_window('vibench_data')
+  local chat = panel_window('vibench_chat')
   local function ordinary(win)
     return current_win(win) and win ~= window and win ~= terminal and win ~= scrubber and win ~= toolinfo
-      and win ~= data and vim.api.nvim_win_get_config(win).relative == ''
+      and win ~= data and win ~= chat and vim.api.nvim_win_get_config(win).relative == ''
       and vim.fn.win_gettype(vim.api.nvim_win_get_number(win)) == ''
   end
   local best, column, area

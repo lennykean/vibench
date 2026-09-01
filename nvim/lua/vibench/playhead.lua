@@ -79,6 +79,12 @@ function M.seek(position, follow)
   return update(clamp(position, current.total), current.total, follow, follow)
 end
 
+-- Automatic navigation (cross-agent landing): move the playhead without
+-- pausing playback the user never paused.
+function M.land(position)
+  return update(clamp(position, current.total), current.total, false, current.playing)
+end
+
 function M.set_follow(follow)
   follow = follow == true
   local position = follow and current.total or current.position
