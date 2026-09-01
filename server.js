@@ -410,6 +410,12 @@ function maintainWindowName(session, sessionName) {
     }).then(({ stdout }) => stdout.trim());
     try {
       const current = await tmux('display-message', '-p', '-t', windowId, '#{window_name}');
+      // Remember the live window name so the Agents catalog can mirror it,
+      // whether vibench set it or the user renamed it by hand.
+      if (current && sessions[session.id] === session && session.window_name !== current) {
+        session.window_name = current;
+        save();
+      }
       const expected = session.window_name_set
         ?? session.tmux?.harness?.window_name ?? session.tmux?.nvim?.window_name;
       const plan = windowRenamePlan({ current, expected, desired: sessionName });

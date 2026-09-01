@@ -853,7 +853,7 @@ async function catalogSessionLocked(session, body = null) {
   const rootTimeline = `/agents/root/${encodeURIComponent(session.id)}/timeline`;
   const root = {
     kind: 'root', id: session.id, root_id: session.id,
-    name: session.name, pwd: session.pwd, created: session.created ?? null,
+    name: session.window_name ?? session.name, pwd: session.pwd, created: session.created ?? null,
     harness: session.harness ?? null, tmux: session.tmux ?? null,
     live: body.source.via === 'pid-session' && !!body.source.session_id
       && (!body.source.reason || body.source.reason === 'transcript not yet created'),
@@ -875,7 +875,8 @@ export async function agentCatalog(registry) {
     catch (error) {
       const timeline = `/agents/root/${encodeURIComponent(session.id)}/timeline`;
       return {
-        kind: 'root', id: session.id, root_id: session.id, name: session.name,
+        kind: 'root', id: session.id, root_id: session.id,
+        name: session.window_name ?? session.name,
         pwd: session.pwd, created: session.created ?? null, harness: session.harness ?? null,
         tmux: session.tmux ?? null, live: false, source_session_id: null,
         source_established: false,
@@ -925,7 +926,8 @@ export async function agentTimelineFor(session, kind, childId, since, requestedR
     const body = await sessionTimelineFor(session, since, requestedRevision, true);
     const source = sources.get(session.id);
     return { ...body, events: cache.get(source?.identity)?.events ?? [], agent: {
-      kind: 'root', id: session.id, root_id: session.id, name: session.name,
+      kind: 'root', id: session.id, root_id: session.id,
+      name: session.window_name ?? session.name,
     } };
   }
   if (kind !== 'child' || !validAgentId(childId)) return null;
